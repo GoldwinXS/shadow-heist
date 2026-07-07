@@ -147,26 +147,83 @@ async function main() {
     }
     return { litNow, closest };
   }
+  const isLit = () => isLitAt(player.position.x, player.position.z);
 
-  // --- Collision: per-axis AABB resolution against walls + crates ---
-  const colliders = L.walls.concat(L.crates);
-  function collideAxis(pos, axis) {
-    for (const c of colliders) {
-      // inflate box by player radius (sphere-vs-AABB, treated as AABB-vs-AABB)
-      const minx = c.min.x - PLAYER_R, maxx = c.max.x + PLAYER_R;
-      const minz = c.min.z - PLAYER_R, maxz = c.max.z + PLAYER_R;
-      if (pos.x > minx && pos.x < maxx && pos.z > minz && pos.z < maxz) {
-        if (axis === "x") {
-          // push out along x toward nearest face
-          if (Math.abs(pos.x - minx) < Math.abs(pos.x - maxx)) pos.x = minx;
-          else pos.x = maxx;
-          vel.x = 0;
-        } else {
-          if (Math.abs(pos.z - minz) < Math.abs(pos.z - maxz)) pos.z = minz;
-          else pos.z = maxz;
-          vel.z = 0;
-        }
-      }
+  // --- Collision: circle-vs-oriented-box + circle-vs-circle in XZ ---
+  // The player is a circle of radius PLAYER_R (top-down). Boxes may be rotated
+  // about Y, so we resolve in each box's LOCAL frame against its true faces —
+  // no world-AABB, so the player can hug the real rotated edges with no phantom
+  // blocked wedge in the corners.
+  const boxes = L.boxes;
+  const cylinders = L.cylinders;
+
+  // Resolve the player against one oriented box. Mutates pos in place and kills
+  // the inward velocity component so the player slides along the face.
+  function collideOBB(pos, b) {
+    const cs = Math.cos(b.rotationY), sn = Math.sin(b.rotationY);
+    // World → local: translate to box center, then rotate by -θ.
+    const dx = pos.x - b.center.x, dz = pos.z - b.center.z;
+    const lx = dx * cs + dz * sn;      // rotate(-θ)
+    const lz = -dx * sn + dz * cs;
+    const hx = b.halfExtents.x, hz = b.halfExtents.z;
+
+    // Closest point on the box to the player, in local space.
+    const clx = Math.max(-hx, Math.min(hx, lx));
+    const clz = Math.max(-hz, Math.min(hz, lz));
+    let nlx = lx - clx, nlz = lz - clz;           // local delta to closest pt
+    let d2 = nlx * nlx + nlz * nlz;
+
+    if (d2 > PLAYER_R * PLAYER_R) return;          // no overlap
+
+    let pushX, pushZ;                              // local push-out vector
+    if (d2 > 1e-8) {
+      const d = Math.sqrt(d2);
+      const pen = PLAYER_R - d;
+      pushX = (nlx / d) * pen;
+      pushZ = (nlz / d) * pen;
+    } else {
+      // Center is INSIDE the box → push out along axis of least penetration.
+      const penX = hx - Math.abs(lx) + PLAYER_R;
+      const penZ = hz - Math.abs(lz) + PLAYER_R;
+      if (penX < penZ) { pushX = (lx < 0 ? -penX : penX); pushZ = 0; }
+      else { pushX = 0; pushZ = (lz < 0 ? -penZ : penZ); }
+    }
+
+    // Local → world: rotate push by +θ and apply.
+    const wpx = pushX * cs - pushZ * sn;
+    const wpz = pushX * sn + pushZ * cs;
+    pos.x += wpx;
+    pos.z += wpz;
+
+    // Remove the velocity component along the collision normal (slide).
+    const nlen = Math.hypot(wpx, wpz);
+    if (nlen > 1e-6) {
+      const nx = wpx / nlen, nz = wpz / nlen;
+      const vn = vel.x * nx + vel.z * nz;
+      if (vn < 0) { vel.x -= vn * nx; vel.z -= vn * nz; }
+    }
+  }
+
+  function collideCylinder(pos, c) {
+    const dx = pos.x - c.center.x, dz = pos.z - c.center.z;
+    const rr = c.radius + PLAYER_R;
+    const d2 = dx * dx + dz * dz;
+    if (d2 > rr * rr || d2 < 1e-8) return;
+    const d = Math.sqrt(d2);
+    const nx = dx / d, nz = dz / d;
+    const pen = rr - d;
+    pos.x += nx * pen;
+    pos.z += nz * pen;
+    const vn = vel.x * nx + vel.z * nz;
+    if (vn < 0) { vel.x -= vn * nx; vel.z -= vn * nz; }
+  }
+
+  function resolveCollisions(pos) {
+    // Two passes so a player wedged into a corner between two colliders gets
+    // pushed clear of both rather than oscillating.
+    for (let i = 0; i < 2; i++) {
+      for (const b of boxes) collideOBB(pos, b);
+      for (const c of cylinders) collideCylinder(pos, c);
     }
   }
 
@@ -249,32 +306,39 @@ async function main() {
       const sp = Math.hypot(vel.x, vel.z);
       if (sp > MAX_SPEED) { vel.x = vel.x / sp * MAX_SPEED; vel.z = vel.z / sp * MAX_SPEED; }
 
-      // Integrate with per-axis collision.
+      // Integrate, then resolve the player circle against all colliders.
       player.position.x += vel.x * dt;
-      collideAxis(player.position, "x");
       player.position.z += vel.z * dt;
-      collideAxis(player.position, "z");
+      resolveCollisions(player.position);
       player.position.y = PLAYER_R; // keep on floor
 
-      // Detection.
-      const { litNow, closest } = isLit();
-      state.lit = litNow;
-      if (litNow) {
-        const g = L.guards.reduce((a, b) => (b.range > a.range ? b : a));
-        const rate = 0.55 * (1 - Math.min(1, closest / g.range)) + 0.15;
-        state.meter = Math.min(1, state.meter + rate * dt);
+      // Detection — only once the player has moved since spawn/respawn. An
+      // idle player is never detected, so respawn loops are impossible.
+      if (state.moved) {
+        const { litNow, closest } = isLit();
+        state.lit = litNow;
+        if (litNow) {
+          const g = L.guards.reduce((a, b) => (b.range > a.range ? b : a));
+          // Gentle at the edge of a pool (~0.12/s), dangerous at the centre
+          // (~0.52/s → caught in ~2s of standing directly under a light).
+          const rate = 0.4 * (1 - Math.min(1, closest / g.range)) + 0.12;
+          state.meter = Math.min(1, state.meter + rate * dt);
+        } else {
+          state.meter = Math.max(0, state.meter - DETECT_DECAY * dt);
+        }
+        if (state.meter >= 1) respawn(true);
       } else {
+        state.lit = false;
         state.meter = Math.max(0, state.meter - DETECT_DECAY * dt);
       }
-      if (state.meter >= 1) respawn(true);
 
       // Win check.
       const dx = player.position.x - L.exit.x;
       const dz = player.position.z - L.exit.z;
       if (Math.hypot(dx, dz) < WIN_RADIUS) doWin();
 
-      // Timer.
-      state.elapsed = (performance.now() - state.startTime) / 1000;
+      // Timer — runs only once the run has actually started (first movement).
+      if (state.timerStarted) state.elapsed = (performance.now() - state.startTime) / 1000;
     }
 
     // Player is a dynamic mesh → refit BVH so its shadow moves.

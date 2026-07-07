@@ -7,7 +7,13 @@ import * as THREE from "three";
  *
  * Returns everything the game loop needs:
  *   scene, camera, spawn, exit, occluders[], guards[], fill, exitBeacon,
- *   walls (AABB colliders), crates (AABB colliders)
+ *   boxes (oriented-box colliders), cylinders (circle colliders)
+ *
+ * Colliders are exported in solver-friendly form so main.js can do proper
+ * circle-vs-oriented-box (OBB) and circle-vs-circle resolution — no world-AABB
+ * approximation, so the player can hug the true rotated faces of angled crates.
+ *   box:      { center:Vector3, halfExtents:{x,z}, rotationY:number }
+ *   cylinder: { center:Vector3, radius:number }
  *
  * The level is intentionally low-poly (boxes + cylinders) — the ray traced GI
  * makes flat geometry look great, and the low tri count keeps both the BVH and
@@ -30,16 +36,12 @@ export function buildLevel() {
   const stoneMat = new THREE.MeshStandardMaterial({ color: 0x353a42, roughness: 0.7 });
   const marbleMat = new THREE.MeshStandardMaterial({ color: 0x4a4e57, roughness: 0.45, metalness: 0.1 });
 
-  // Colliders exposed to physics + detection raycasts.
-  const walls = [];   // { min:Vec3, max:Vec3 }
-  const crates = [];  // { min:Vec3, max:Vec3 }
-  const occluders = []; // meshes for THREE.Raycaster line-of-sight tests
-
-  const addAABB = (arr, mesh) => {
-    mesh.updateMatrixWorld(true);
-    const box = new THREE.Box3().setFromObject(mesh);
-    arr.push({ min: box.min.clone(), max: box.max.clone() });
-  };
+  // Colliders exposed to physics. Boxes are oriented (rotate about Y only);
+  // cylinders are circles in XZ. main.js resolves the player sphere against
+  // these exactly (circle-vs-OBB / circle-vs-circle).
+  const boxes = [];      // { center:Vec3, halfExtents:{x,z}, rotationY }
+  const cylinders = [];  // { center:Vec3, radius }
+  const occluders = [];  // meshes for THREE.Raycaster line-of-sight tests
 
   // --- Floor ---
   const floor = new THREE.Mesh(new THREE.BoxGeometry(ROOM.x * 2 + 1, 0.4, ROOM.z * 2 + 1), floorMat);
@@ -53,7 +55,12 @@ export function buildLevel() {
     m.position.set(x, y, z);
     scene.add(m);
     occluders.push(m);
-    addAABB(walls, m);
+    // Walls are axis-aligned boxes = OBB with rotationY 0 (unified path).
+    boxes.push({
+      center: new THREE.Vector3(x, y, z),
+      halfExtents: { x: w / 2, z: d / 2 },
+      rotationY: 0,
+    });
     return m;
   }
   const hy = ROOM.wallH / 2;
@@ -69,7 +76,13 @@ export function buildLevel() {
     m.rotation.y = rotY;
     scene.add(m);
     occluders.push(m);
-    addAABB(crates, m);
+    // Oriented collider: the solver rotates the player into local space, so the
+    // true rotated faces are the collision surface (no world-AABB phantom box).
+    boxes.push({
+      center: new THREE.Vector3(x, h / 2, z),
+      halfExtents: { x: w / 2, z: d / 2 },
+      rotationY: rotY,
+    });
     return m;
   }
   function pillar(r, h, x, z, mat = stoneMat) {
@@ -77,10 +90,8 @@ export function buildLevel() {
     m.position.set(x, h / 2, z);
     scene.add(m);
     occluders.push(m);
-    // Approximate the cylinder with its bounding box for collision.
-    const min = new THREE.Vector3(x - r, 0, z - r);
-    const max = new THREE.Vector3(x + r, h, z + r);
-    crates.push({ min, max });
+    // Cylinders collide as circles in XZ — exact, and rotation-invariant.
+    cylinders.push({ center: new THREE.Vector3(x, h / 2, z), radius: r });
     return m;
   }
   function statue(x, z) {
@@ -90,18 +101,25 @@ export function buildLevel() {
     fig.position.set(x, 1.9, z);
     scene.add(fig);
     occluders.push(fig);
-    const min = new THREE.Vector3(x - 0.5, 0, z - 0.5);
-    const max = new THREE.Vector3(x + 0.5, 2.8, z + 0.5);
-    crates.push({ min, max });
+    // The pedestal (r=0.9) is the collision footprint; the slimmer figure sits
+    // inside it, so a single circle collider covers the whole statue.
     return fig;
   }
 
   // Layout: spawn is bottom-left (-x,+z), exit is top-right (+x,-z). Props form
   // a broken diagonal so there's an interesting risky path with cover pockets.
   box(2.2, 2.0, 2.2, -6.5, 3.6);
+  // Spawn shield: a tall crate between the spawn corner and guard #3's orbit
+  // arc, so an idle player at spawn is never in any patrol light's line of
+  // sight (verified over the full patrol cycle — see main.js checkLitAt).
+  box(2.6, 2.6, 2.0, -7.7, 4.8, crateMat, 0.05);
   box(1.6, 1.4, 3.0, -8.5, -1.5, crateMat, 0.3);
   box(2.6, 1.2, 1.6, -3.0, 5.0);
   box(1.8, 2.4, 1.8, -1.0, -0.5, crateMat, 0.6);
+  // Obviously-rotated long crate on the main path (≈37°). Its footprint is very
+  // non-square, so any world-AABB collision would block a large phantom wedge —
+  // this is the crate to test circle-vs-OBB sliding against.
+  box(3.4, 1.7, 1.2, 1.2, 1.3, crateMat, Math.PI / 4.9);
   box(3.0, 1.6, 1.4, 2.0, 3.5, crateMat, -0.2);
   box(2.0, 2.2, 2.0, 5.0, -1.0);
   box(1.4, 1.4, 2.4, 7.5, 2.5, crateMat, 0.4);
