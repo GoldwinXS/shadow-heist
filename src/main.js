@@ -22,9 +22,10 @@ const PLAYER_R = 0.35;
 const MAX_SPEED = 4.5;
 const ACCEL = 34;       // u/s^2 toward input direction
 const DAMPING = 9;      // velocity decay when no input
-const CAM_OFFSET = new THREE.Vector3(0, 9, 7);
+// High enough that the front wall (h=4) never hides the player near it.
+const CAM_OFFSET = new THREE.Vector3(0, 10, 5.5);
 const CAM_LERP = 0.06;
-const DETECT_DECAY = 0.3;      // per second in shadow
+const DETECT_DECAY = 0.4;      // per second in shadow (generous)
 const WIN_RADIUS = 1.6;        // distance to exit that counts as a win
 
 async function main() {
@@ -52,7 +53,7 @@ async function main() {
   const rt = new RealtimeRaytracer(renderer, {
     renderScale: 0.5,
     maxHistory: 16,               // short history → moving lights/shadows react fast
-    envColor: new THREE.Color(0x05070c),
+    envColor: new THREE.Color(0x0b0f16), // lifted ambient keeps shadow areas readable
   });
 
   setBoot("building BVH…");
@@ -76,9 +77,14 @@ async function main() {
     attempts: 1,
     elapsed: 0,
     startTime: 0,
+    // Detection (and the run timer) only engage once the player has actually
+    // moved — an untouched player at spawn/respawn can never be detected.
+    moved: false,        // any movement input since the last spawn/respawn
+    timerStarted: false, // first movement of the whole run starts the clock
     best: parseFloat(localStorage.getItem("shadowHeistBest")) || null,
   };
   const vel = new THREE.Vector3();
+  const testInput = { active: false, x: 0, z: 0 }; // playtest input override
 
   // --- Input ---
   const keys = new Set();
@@ -114,8 +120,7 @@ async function main() {
 
   function startGame() {
     if (state.started) return;
-    state.started = true;
-    state.startTime = performance.now();
+    state.started = true; // the run clock starts on first movement, not here
     el.start.classList.add("hidden");
   }
   el.start.addEventListener("click", startGame);
@@ -127,9 +132,9 @@ async function main() {
   const tmpDir = new THREE.Vector3();
   const eyePos = new THREE.Vector3();
 
-  function isLit() {
-    // Player is lit if ANY guard light has line of sight within range.
-    eyePos.copy(player.position); eyePos.y = 0.5; // sample near orb centre
+  function isLitAt(px, pz) {
+    // A position is lit if ANY guard light has line of sight within range.
+    eyePos.set(px, 0.5, pz); // sample near orb centre height
     let litNow = false;
     let closest = 1e9;
     for (const g of L.guards) {
@@ -231,6 +236,8 @@ async function main() {
     player.position.copy(L.spawn);
     vel.set(0, 0, 0);
     state.meter = 0;
+    state.lit = false;
+    state.moved = false; // detection re-arms on the next movement input
     if (caught) {
       state.attempts += 1;
       el.attempts.textContent = state.attempts;
@@ -286,14 +293,28 @@ async function main() {
     L.exitBeacon.ring.scale.set(sc, 1, sc);
 
     if (state.started) {
-      // Input → acceleration.
+      // Input → acceleration. testInput lets automated playtests drive the
+      // player through the exact same code path as the keyboard.
       let ix = 0, iz = 0;
-      if (keys.has("w") || keys.has("arrowup")) iz -= 1;
-      if (keys.has("s") || keys.has("arrowdown")) iz += 1;
-      if (keys.has("a") || keys.has("arrowleft")) ix -= 1;
-      if (keys.has("d") || keys.has("arrowright")) ix += 1;
+      if (testInput.active) {
+        ix = testInput.x; iz = testInput.z;
+      } else {
+        if (keys.has("w") || keys.has("arrowup")) iz -= 1;
+        if (keys.has("s") || keys.has("arrowdown")) iz += 1;
+        if (keys.has("a") || keys.has("arrowleft")) ix -= 1;
+        if (keys.has("d") || keys.has("arrowright")) ix += 1;
+      }
       const len = Math.hypot(ix, iz);
       if (len > 0) {
+        // First movement since spawn/respawn arms detection; the first
+        // movement of the whole run starts the clock.
+        if (!state.moved) {
+          state.moved = true;
+          if (!state.timerStarted) {
+            state.timerStarted = true;
+            state.startTime = performance.now();
+          }
+        }
         ix /= len; iz /= len;
         vel.x += ix * ACCEL * dt;
         vel.z += iz * ACCEL * dt;
@@ -379,6 +400,16 @@ async function main() {
       start: () => startGame(),
       step,
       respawn,
+      // Detection probe for automated tests: is position (x,z) lit when the
+      // patrols are at time t? (Repositions the guard lights; the next real
+      // frame's patrol() call restores them.)
+      checkLitAt(x, z, t) {
+        if (t != null) for (const g of L.guards) g.patrol(t);
+        return isLitAt(x, z).litNow;
+      },
+      // Playtest input override — routes through the real movement code.
+      setInput(x, z) { testInput.active = true; testInput.x = x; testInput.z = z; },
+      clearInput() { testInput.active = false; testInput.x = 0; testInput.z = 0; },
     },
   });
 

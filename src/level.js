@@ -157,69 +157,95 @@ export function buildLevel() {
   const exitBeacon = { disc: exitDisc, ring: exitRing };
 
   // --- Lights ---
-  // Dim high fill so shadow areas are readable (not pitch black).
-  const fill = new THREE.PointLight(0xafc4e0, 2.2, 60);
+  // High fill so shadow areas are readable (not pitch black). Large rtRadius
+  // keeps its shadows very soft — it reads as ambience, not a light pool.
+  const fill = new THREE.PointLight(0xafc4e0, 4.5, 60);
   fill.position.set(0, 9, 0);
-  fill.userData.rtRadius = 0.5;
+  fill.userData.rtRadius = 0.9;
   scene.add(fill);
 
-  // A faint cool key from above the far corner keeps the room from being flat.
-  const ambientKey = new THREE.PointLight(0x8098c0, 1.4, 50);
+  // Two faint cool fills over opposite corners so every patrol phase leaves
+  // the room layout discernible without washing out the guard-light pools.
+  const ambientKey = new THREE.PointLight(0x8098c0, 2.4, 50);
   ambientKey.position.set(-8, 8, 6);
-  ambientKey.userData.rtRadius = 0.6;
+  ambientKey.userData.rtRadius = 0.8;
   scene.add(ambientKey);
 
-  // Three warm patrolling guard lights. `patrol` is called each frame with
-  // elapsed time to reposition them. range is the detection range.
-  const guardColor = 0xffd39a;
-  function guardLight() {
-    const l = new THREE.PointLight(guardColor, 26, 22);
+  const ambientKey2 = new THREE.PointLight(0x8098c0, 2.0, 50);
+  ambientKey2.position.set(8, 8, -6);
+  ambientKey2.userData.rtRadius = 0.8;
+  scene.add(ambientKey2);
+
+  // Three patrolling guard lights (two warm, one magenta for variety). Each
+  // gets a small glowing fixture orb so players can SEE the light source they
+  // are dodging. The fixture uses userData.rtExclude so it rasterizes (visible,
+  // glowing) but stays OUT of the BVH — a mesh at the light's exact position
+  // would otherwise occlude the light's own shadow rays and kill its
+  // illumination. rtExclude meshes cost nothing to move (the G-buffer
+  // re-rasterizes every frame anyway).
+  function guardLight(color, intensity) {
+    const l = new THREE.PointLight(color, intensity, 22);
     l.position.y = 3.5;
     l.userData.rtRadius = 0.3;
     scene.add(l);
-    return l;
+    const fixture = new THREE.Mesh(
+      new THREE.SphereGeometry(0.18, 16, 12),
+      new THREE.MeshStandardMaterial({
+        color: 0x000000, emissive: color, emissiveIntensity: 5,
+      })
+    );
+    fixture.userData.rtExclude = true;
+    scene.add(fixture);
+    return { l, fixture };
   }
 
-  const g1 = guardLight(); // sweeping circular arc (left/centre)
-  const g2 = guardLight(); // ping-pong along a line (right)
-  const g3 = guardLight(); // orbit central statue
+  const warm = 0xffd39a;
+  const magenta = 0xff4fb0;
+  const { l: g1, fixture: f1 } = guardLight(warm, 26);    // sweeping arc
+  const { l: g2, fixture: f2 } = guardLight(warm, 26);    // ping-pong line
+  const { l: g3, fixture: f3 } = guardLight(magenta, 26); // orbit central statue
 
+  // Patrol speeds tuned for a first-time player: slow enough to read and
+  // predict, fast enough to force timing. `range` is the detection range.
   const guards = [
     {
-      light: g1,
-      range: 9,
+      light: g1, fixture: f1,
+      range: 8,
       patrol(t) {
-        const a = -0.9 + Math.sin(t * 0.45) * 1.15; // sweeping arc
+        const a = -0.9 + Math.sin(t * 0.3) * 1.15; // sweeping arc
         const r = 7.5;
         g1.position.set(-3.5 + Math.cos(a) * r, 3.6, Math.sin(a) * r * 0.7);
+        f1.position.copy(g1.position);
       },
     },
     {
-      light: g2,
-      range: 9,
+      light: g2, fixture: f2,
+      range: 8,
       patrol(t) {
-        const s = Math.sin(t * 0.55); // ping-pong along +x/-z diagonal-ish line
+        const s = Math.sin(t * 0.38); // ping-pong along the right side
         g2.position.set(6.5, 3.5, s * 6.0);
+        f2.position.copy(g2.position);
       },
     },
     {
-      light: g3,
-      range: 8.5,
+      light: g3, fixture: f3,
+      range: 8,
       patrol(t) {
-        const a = t * 0.6; // orbit the central statue
+        const a = t * 0.42; // orbit the central statue
         g3.position.set(Math.cos(a) * 4.5, 3.4, 1.5 + Math.sin(a) * 4.5);
+        f3.position.copy(g3.position);
       },
     },
   ];
   // Initialise positions at t=0.
   guards.forEach((g) => g.patrol(0));
 
-  const lights = [fill, ambientKey, g1, g2, g3];
+  const lights = [fill, ambientKey, ambientKey2, g1, g2, g3];
 
   return {
     scene, camera, ROOM,
     spawn, exit,
-    occluders, walls, crates,
+    occluders, boxes, cylinders,
     guards, fill, ambientKey, lights,
     exitBeacon, centralStatue,
   };
