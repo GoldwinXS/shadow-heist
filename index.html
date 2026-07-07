@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Shadow Heist — ray traced stealth</title>
+  <style>
+    :root {
+      --panel: rgba(10, 14, 20, 0.72);
+      --panel-border: rgba(120, 200, 220, 0.18);
+      --ink: #cfe0ea;
+      --ink-dim: #7f93a2;
+      --accent: #38d0e0;
+      --danger: #ff5a52;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; height: 100%; overflow: hidden; background: #05070c;
+      font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      color: var(--ink); user-select: none;
+    }
+    #app { width: 100%; height: 100%; position: fixed; inset: 0; }
+    #app canvas { display: block; width: 100%; height: 100%; }
+
+    /* --- Boot / loading overlay --- */
+    #boot {
+      position: fixed; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 16px; z-index: 90;
+      color: var(--ink); font-size: 14px; line-height: 1.5;
+      background: radial-gradient(circle at 50% 40%, #10161f, #05070c);
+      transition: opacity 0.5s; text-align: center; padding: 20px;
+    }
+    #boot.hidden { opacity: 0; pointer-events: none; }
+    #boot .spin {
+      width: 34px; height: 34px; border: 3px solid #1c2a36;
+      border-top-color: var(--accent); border-radius: 50%;
+      animation: spin 0.9s linear infinite;
+    }
+    #boot .err { color: #ff8a80; max-width: 560px; white-space: pre-wrap; text-align: left; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* --- Red damage flash (caught) --- */
+    #flash {
+      position: fixed; inset: 0; z-index: 70; pointer-events: none;
+      background: radial-gradient(circle at 50% 50%, rgba(255,40,30,0.0) 30%, rgba(255,30,25,0.55) 100%);
+      opacity: 0; transition: opacity 0.12s ease-out;
+    }
+    #flash.on { opacity: 1; transition: none; }
+
+    /* --- "Lit" vignette (thin red edge when in light) --- */
+    #vignette {
+      position: fixed; inset: 0; z-index: 60; pointer-events: none; opacity: 0;
+      box-shadow: inset 0 0 140px 30px rgba(255, 60, 50, 0.55);
+      transition: opacity 0.15s linear;
+    }
+
+    /* --- HUD --- */
+    #hud {
+      position: fixed; inset: 0; z-index: 40; pointer-events: none;
+    }
+    .panel {
+      background: var(--panel); border: 1px solid var(--panel-border);
+      border-radius: 10px; backdrop-filter: blur(6px);
+      box-shadow: 0 6px 24px rgba(0,0,0,0.45);
+    }
+    #topbar {
+      position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+      display: flex; gap: 22px; padding: 10px 18px; align-items: center;
+      font-size: 13px; letter-spacing: 0.5px;
+    }
+    #topbar .stat { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 62px; }
+    #topbar .stat .label { color: var(--ink-dim); font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
+    #topbar .stat .val { color: var(--ink); font-size: 16px; font-variant-numeric: tabular-nums; }
+    #topbar .sep { width: 1px; align-self: stretch; background: var(--panel-border); }
+
+    /* Detection meter */
+    #detect {
+      position: absolute; left: 50%; bottom: 74px; transform: translateX(-50%);
+      display: flex; align-items: center; gap: 12px; padding: 12px 16px; width: 340px;
+    }
+    #detect.shake { animation: shake 0.18s infinite; }
+    @keyframes shake {
+      0% { transform: translateX(-50%) translate(0,0); }
+      25% { transform: translateX(-50%) translate(-2px,1px); }
+      50% { transform: translateX(-50%) translate(2px,-1px); }
+      75% { transform: translateX(-50%) translate(-1px,-1px); }
+      100% { transform: translateX(-50%) translate(1px,1px); }
+    }
+    #eye { flex: 0 0 auto; width: 26px; height: 26px; color: var(--ink-dim); transition: color 0.15s; }
+    #eye.lit { color: var(--danger); }
+    #meterWrap {
+      flex: 1 1 auto; height: 14px; border-radius: 7px; overflow: hidden;
+      background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.08);
+    }
+    #meterFill {
+      height: 100%; width: 0%;
+      background: linear-gradient(90deg, #35d07a, #d0c53a 55%, #ff5a52);
+      transition: width 0.08s linear;
+    }
+    #detectLabel { flex: 0 0 auto; font-size: 10px; color: var(--ink-dim); text-transform: uppercase; letter-spacing: 1px; width: 38px; text-align: right; }
+
+    /* Hint line */
+    #hint {
+      position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%);
+      font-size: 12px; color: var(--ink-dim); letter-spacing: 0.5px; text-align: center;
+    }
+    #hint b { color: var(--accent); font-weight: 600; }
+
+    /* --- Start overlay --- */
+    #start {
+      position: fixed; inset: 0; z-index: 80; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 20px; text-align: center;
+      background: radial-gradient(circle at 50% 45%, rgba(16,22,31,0.82), rgba(5,7,12,0.94));
+      cursor: pointer; transition: opacity 0.4s;
+    }
+    #start.hidden { opacity: 0; pointer-events: none; }
+    #start h1 {
+      margin: 0; font-size: 42px; letter-spacing: 8px; font-weight: 700;
+      color: #eaf4f8; text-shadow: 0 0 24px rgba(56,208,224,0.35);
+    }
+    #start .sub { max-width: 460px; font-size: 14px; line-height: 1.6; color: var(--ink); }
+    #start .cta {
+      margin-top: 6px; padding: 12px 26px; font-size: 13px; letter-spacing: 2px;
+      text-transform: uppercase; color: #05070c; background: var(--accent);
+      border-radius: 8px; font-weight: 700; box-shadow: 0 0 20px rgba(56,208,224,0.4);
+    }
+    #start .keys { font-size: 12px; color: var(--ink-dim); letter-spacing: 1px; }
+
+    /* --- Win overlay --- */
+    #win {
+      position: fixed; inset: 0; z-index: 82; display: none; flex-direction: column;
+      align-items: center; justify-content: center; gap: 16px; text-align: center;
+      background: radial-gradient(circle at 50% 45%, rgba(10,26,22,0.86), rgba(5,7,12,0.96));
+    }
+    #win.show { display: flex; }
+    #win h1 {
+      margin: 0; font-size: 38px; letter-spacing: 6px; color: #7ef0c2;
+      text-shadow: 0 0 24px rgba(90,240,180,0.4);
+    }
+    #win .row { display: flex; gap: 34px; margin: 6px 0; }
+    #win .cell { display: flex; flex-direction: column; gap: 4px; }
+    #win .cell .k { font-size: 10px; text-transform: uppercase; letter-spacing: 1.5px; color: var(--ink-dim); }
+    #win .cell .v { font-size: 24px; font-variant-numeric: tabular-nums; color: var(--ink); }
+    #win #playAgain {
+      margin-top: 10px; padding: 12px 28px; font-size: 13px; letter-spacing: 2px;
+      text-transform: uppercase; color: #05070c; background: #7ef0c2; border: none;
+      border-radius: 8px; font-weight: 700; cursor: pointer; font-family: inherit;
+      box-shadow: 0 0 20px rgba(90,240,180,0.4);
+    }
+    #win #playAgain:hover { filter: brightness(1.08); }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+
+  <!-- Damage flash + lit vignette -->
+  <div id="flash"></div>
+  <div id="vignette"></div>
+
+  <!-- HUD -->
+  <div id="hud">
+    <div id="topbar" class="panel">
+      <div class="stat"><span class="label">Time</span><span class="val" id="hudTime">0.0</span></div>
+      <div class="sep"></div>
+      <div class="stat"><span class="label">Attempts</span><span class="val" id="hudAttempts">1</span></div>
+      <div class="sep"></div>
+      <div class="stat"><span class="label">Best</span><span class="val" id="hudBest">—</span></div>
+    </div>
+
+    <div id="detect" class="panel">
+      <svg id="eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/>
+        <circle cx="12" cy="12" r="3"/>
+      </svg>
+      <div id="meterWrap"><div id="meterFill"></div></div>
+      <div id="detectLabel">SEEN</div>
+    </div>
+
+    <div id="hint"><b>WASD</b> / arrows to move &middot; stay out of the light &middot; reach the glowing vault exit</div>
+  </div>
+
+  <!-- Start overlay -->
+  <div id="start">
+    <h1>SHADOW HEIST</h1>
+    <div class="sub">Reach the vault exit without being seen. Sweeping guard lights patrol the room — hide behind crates and statues, cross through the dark.</div>
+    <div class="cta">Click to start</div>
+    <div class="keys">WASD or arrow keys to move</div>
+  </div>
+
+  <!-- Win overlay -->
+  <div id="win">
+    <h1>VAULT REACHED</h1>
+    <div class="row">
+      <div class="cell"><span class="k">Time</span><span class="v" id="winTime">—</span></div>
+      <div class="cell"><span class="k">Attempts</span><span class="v" id="winAttempts">—</span></div>
+      <div class="cell"><span class="k">Best</span><span class="v" id="winBest">—</span></div>
+    </div>
+    <button id="playAgain">Play again</button>
+  </div>
+
+  <!-- Boot / loading -->
+  <div id="boot">
+    <div class="spin"></div>
+    <div id="boot-msg">loading ray tracer…</div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>
