@@ -207,9 +207,10 @@ async function main() {
     camera.position.lerp(camTarget, CAM_LERP);
     camera.lookAt(player.position);
   }
-  // Snap camera to spawn on load.
+  // Snap camera to the player on load, but aim it at the room so the start
+  // overlay has an atmospheric backdrop rather than the spawn-corner wall.
   camera.position.copy(L.spawn).add(CAM_OFFSET);
-  camera.lookAt(L.spawn);
+  camera.lookAt(-2, 0, 0);
 
   // --- Per-frame simulation step (also used by window.GAME.step for testing) ---
   function step(dt) {
