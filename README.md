@@ -63,7 +63,7 @@ npm run preview    # http://localhost:4173
 
 ## Live demo
 
-(link added on publish)
+**Play it: https://goldwinxs.github.io/shadow-heist/**
 
 ## Credits
 
