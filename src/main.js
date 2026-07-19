@@ -56,7 +56,10 @@ async function main() {
     envColor: new THREE.Color(0x0b0f16), // lifted ambient keeps shadow areas readable
     // Atmosphere: single-scatter fog turns the guard spot cones into visible
     // sweeping beams — the whole point of the SpotLight upgrade.
-    volumetric: { enabled: true, density: 0.015 },
+    // Kept LOW: the guard lights move every frame, so fog never converges —
+    // density is the noise-vs-atmosphere dial (the library's wide fog blur
+    // handles the rest).
+    volumetric: { enabled: true, density: 0.008 },
     // Adaptive quality governor keeps the frame rate near target on weak GPUs by
     // steering renderScale / denoise / stochastic sampling. restir and
     // overloadProtection are left at their (on-by-default) values.
