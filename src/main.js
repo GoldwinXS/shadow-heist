@@ -59,7 +59,7 @@ async function main() {
     // Kept LOW: the guard lights move every frame, so fog never converges —
     // density is the noise-vs-atmosphere dial (the library's wide fog blur
     // handles the rest).
-    volumetric: { enabled: true, density: 0.008 },
+    volumetric: { enabled: true, density: 0.012 },
     // Adaptive quality governor keeps the frame rate near target on weak GPUs by
     // steering renderScale / denoise / stochastic sampling. restir and
     // overloadProtection are left at their (on-by-default) values.
