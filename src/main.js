@@ -43,6 +43,16 @@ async function main() {
   player.position.copy(L.spawn);
   scene.add(player);
 
+  // Cold "moonlight" fill: when the guards became narrow spot cones the level
+  // lost most of its illumination and became unreadable. A faint directional
+  // wash restores spatial reading (and drowns fog grain, which is most
+  // visible against black) while the beams stay the bright threats. NOT a
+  // guard light — detection only consults L.guards, so gameplay is unchanged.
+  const moon = new THREE.DirectionalLight(0x9db4d6, 0.55);
+  moon.position.set(-14, 20, 8);
+  moon.userData.rtRadius = 0.06; // slightly soft moon shadows
+  scene.add(moon, moon.target);
+
   // --- Renderer + raytracer ---
   setBoot("starting ray tracer…");
   const renderer = new THREE.WebGLRenderer({ antialias: false });
@@ -52,14 +62,17 @@ async function main() {
 
   const rt = new RealtimeRaytracer(renderer, {
     renderScale: 0.5,
-    maxHistory: 16,               // short history → moving lights/shadows react fast
-    envColor: new THREE.Color(0x0b0f16), // lifted ambient keeps shadow areas readable
+    // Was 16 pre-ReSTIR; blue noise + reservoirs keep moving shadows honest
+    // at a longer history, and the extra accumulation smooths the dark scene.
+    maxHistory: 40,
+    envColor: new THREE.Color(0x121826), // lifted ambient keeps shadow areas readable
     // Atmosphere: single-scatter fog turns the guard spot cones into visible
     // sweeping beams — the whole point of the SpotLight upgrade.
     // Kept LOW: the guard lights move every frame, so fog never converges —
     // density is the noise-vs-atmosphere dial (the library's wide fog blur
     // handles the rest).
-    volumetric: { enabled: true, density: 0.012 },
+    // Lower now that the moonlight carries readability — fog is pure mood.
+    volumetric: { enabled: true, density: 0.007 },
     // Adaptive quality governor keeps the frame rate near target on weak GPUs by
     // steering renderScale / denoise / stochastic sampling. restir and
     // overloadProtection are left at their (on-by-default) values.
