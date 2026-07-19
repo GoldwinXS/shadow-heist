@@ -109,6 +109,11 @@ async function main() {
   };
   const vel = new THREE.Vector3();
   const testInput = { active: false, x: 0, z: 0 }; // playtest input override
+  // Virtual-joystick input (touch/pointer). Consulted in the same movement
+  // block as the keyboard so physics/feel are identical. x/z are already
+  // normalized to the [-1,1] screen-derived direction; screen-up = -Z to match
+  // the W / arrowup key mapping below.
+  const touchInput = { active: false, x: 0, z: 0 };
 
   // --- Input ---
   const keys = new Set();
@@ -149,6 +154,73 @@ async function main() {
   }
   el.start.addEventListener("click", startGame);
   el.playAgain.addEventListener("click", () => location.reload());
+
+  // --- Virtual joystick (pointer events → touchInput) ---
+  // A left-thumb floating stick: touch/click anywhere in the lower-left ~60%
+  // of the screen anchors a base ring; the knob follows the finger (clamped to
+  // JOY_RADIUS) and yields a normalized direction that feeds the SAME movement
+  // block as the keyboard. Pointer events mean it also works with a mouse for
+  // desktop testing. The listener lives on #touchLayer (z 30, below the HUD at
+  // 40 and the start/win overlays at 80/82) so it never blocks their buttons.
+  const touchLayer = document.getElementById("touchLayer");
+  const joyBase = document.getElementById("joyBase");
+  const joyKnob = document.getElementById("joyKnob");
+  const JOY_RADIUS = 48;      // knob clamp + normalization radius (px)
+  let joyId = null;           // pointerId of the finger currently driving the stick
+  let joyOx = 0, joyOy = 0;   // base anchor in screen px
+
+  function joyStart(e) {
+    if (joyId !== null) return;                          // already tracking a finger
+    if (e.clientX > window.innerWidth * 0.6) return;     // left ~60% only
+    if (e.clientY < window.innerHeight * 0.4) return;    // lower part only
+    // Ignore pointers that begin on an interactive HUD/overlay control.
+    if (e.target && e.target.closest && e.target.closest("button, a, .cta")) return;
+
+    if (!state.started) startGame();                     // first touch starts the run
+
+    joyId = e.pointerId;
+    try { touchLayer.setPointerCapture(joyId); } catch (_) {}
+    joyOx = e.clientX; joyOy = e.clientY;
+    joyBase.style.left = joyOx + "px";
+    joyBase.style.top = joyOy + "px";
+    joyBase.classList.add("on");
+    joyKnob.classList.add("on");
+    joyMove(e);
+    e.preventDefault();
+  }
+
+  function joyMove(e) {
+    if (e.pointerId !== joyId) return;
+    const dx = e.clientX - joyOx;
+    const dy = e.clientY - joyOy;
+    const len = Math.hypot(dx, dy);
+    const clamp = Math.min(len, JOY_RADIUS);
+    const kx = len > 0 ? (dx / len) * clamp : 0;
+    const ky = len > 0 ? (dy / len) * clamp : 0;
+    joyKnob.style.left = (joyOx + kx) + "px";
+    joyKnob.style.top = (joyOy + ky) + "px";
+    // Screen-right (+dx) → +X (D key); screen-up (−dy) → −Z (W/arrowup key).
+    // dy is +down in screen space, so z = ky/R makes an up-push a negative Z.
+    touchInput.active = true;
+    touchInput.x = kx / JOY_RADIUS;
+    touchInput.z = ky / JOY_RADIUS;
+    e.preventDefault();
+  }
+
+  function joyEnd(e) {
+    if (e.pointerId !== joyId) return;
+    try { touchLayer.releasePointerCapture(joyId); } catch (_) {}
+    joyId = null;
+    touchInput.active = false;
+    touchInput.x = 0; touchInput.z = 0;
+    joyBase.classList.remove("on");
+    joyKnob.classList.remove("on");
+  }
+
+  touchLayer.addEventListener("pointerdown", joyStart);
+  touchLayer.addEventListener("pointermove", joyMove);
+  touchLayer.addEventListener("pointerup", joyEnd);
+  touchLayer.addEventListener("pointercancel", joyEnd);
 
   // --- Detection raycasting ---
   const ray = new THREE.Raycaster();
@@ -335,6 +407,10 @@ async function main() {
       let ix = 0, iz = 0;
       if (testInput.active) {
         ix = testInput.x; iz = testInput.z;
+      } else if (touchInput.active) {
+        // Joystick: already a normalized screen-derived vector. screen-up = -Z
+        // (matches the W / arrowup branch), screen-right = +X (matches D).
+        ix = touchInput.x; iz = touchInput.z;
       } else {
         if (keys.has("w") || keys.has("arrowup")) iz -= 1;
         if (keys.has("s") || keys.has("arrowdown")) iz += 1;

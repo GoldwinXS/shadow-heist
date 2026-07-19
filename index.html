@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
   <title>Shadow Heist — ray traced stealth</title>
   <style>
     :root {
@@ -148,10 +148,43 @@
       box-shadow: 0 0 20px rgba(90,240,180,0.4);
     }
     #win #playAgain:hover { filter: brightness(1.08); }
+
+    /* --- Touch controls --- */
+    /* Full-screen listener layer for the virtual joystick. Sits below the HUD
+       (z 40) and the start/win overlays (z 80/82) so it never blocks their
+       buttons; touch-action:none stops scroll/zoom gestures during play. */
+    #touchLayer {
+      position: fixed; inset: 0; z-index: 30; touch-action: none;
+      background: transparent;
+    }
+    /* Base ring + knob are painted overlays only — pointer-events:none so they
+       never eat input; the listener lives on #touchLayer. */
+    #joyBase, #joyKnob {
+      position: fixed; pointer-events: none; display: none; z-index: 50;
+      border-radius: 50%; transform: translate(-50%, -50%);
+    }
+    #joyBase {
+      width: 120px; height: 120px;
+      background: rgba(10, 14, 20, 0.42);
+      border: 2px solid rgba(56, 208, 224, 0.35);
+      box-shadow: 0 0 22px rgba(56, 208, 224, 0.18);
+    }
+    #joyKnob {
+      width: 54px; height: 54px;
+      background: rgba(56, 208, 224, 0.28);
+      border: 2px solid rgba(56, 208, 224, 0.7);
+      box-shadow: 0 0 16px rgba(56, 208, 224, 0.4);
+    }
+    #joyBase.on, #joyKnob.on { display: block; }
   </style>
 </head>
 <body>
   <div id="app"></div>
+
+  <!-- Touch / pointer joystick (listener layer + painted overlays) -->
+  <div id="touchLayer"></div>
+  <div id="joyBase"></div>
+  <div id="joyKnob"></div>
 
   <!-- Damage flash + lit vignette -->
   <div id="flash"></div>
