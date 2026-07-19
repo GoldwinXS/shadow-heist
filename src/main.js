@@ -67,18 +67,28 @@ async function main() {
     maxHistory: 40,
     envColor: new THREE.Color(0x121826), // lifted ambient keeps shadow areas readable
     // Atmosphere: single-scatter fog turns the guard spot cones into visible
-    // sweeping beams — the whole point of the SpotLight upgrade.
-    // Kept LOW: the guard lights move every frame, so fog never converges —
-    // density is the noise-vs-atmosphere dial (the library's wide fog blur
-    // handles the rest).
-    // Lower now that the moonlight carries readability — fog is pure mood.
-    volumetric: { enabled: true, density: 0.007 },
+    // sweeping beams. Global density is now 0 — fog is applied PER ZONE instead
+    // (see rt.volumetric.zones below): a thick candle-lit band over the bridge,
+    // a faint haze in act 3, and none in the act-1 vault.
+    volumetric: { enabled: true, density: 0 },
     // Adaptive quality governor keeps the frame rate near target on weak GPUs by
     // steering renderScale / denoise / stochastic sampling. restir and
     // overloadProtection are left at their (on-by-default) values.
     adaptiveQuality: true,
     targetFps: 55,
   });
+
+  // --- Fog zones (candle-lit bridge set piece) ---------------------------
+  // The volumetric pass will support per-zone density (up to 8 AABBs) in the
+  // fog-zones library build; we write against that API now. Global density is
+  // 0 (set above), so the bridge gets its ~0.02 mood fog and act 3 a faint
+  // 0.004 haze, while the act-1 vault stays clear. This is just a property
+  // write — harmless on the CURRENT build (the pass reads the scalar density),
+  // so on older libraries fog simply stays off until the fog-zones build lands.
+  rt.volumetric.zones = [
+    { min: L.bridgeZone.min, max: L.bridgeZone.max, density: L.bridgeZone.density },
+    { min: L.act3Zone.min, max: L.act3Zone.max, density: L.act3Zone.density },
+  ];
 
   setBoot("building BVH…");
   const t0 = performance.now();
@@ -106,6 +116,11 @@ async function main() {
     moved: false,        // any movement input since the last spawn/respawn
     timerStarted: false, // first movement of the whole run starts the clock
     best: parseFloat(localStorage.getItem("shadowHeistBest")) || null,
+    // Three-act checkpointing: respawn at the START OF THE CURRENT ACT.
+    // stage 0 = act-1 vault, 1 = bridge, 2 = act-3 room. Monotonic (only
+    // advances) so walking back never demotes the checkpoint.
+    stage: 0,
+    checkpoint: L.checkpoints.act1Spawn.clone(),
   };
   const vel = new THREE.Vector3();
   const testInput = { active: false, x: 0, z: 0 }; // playtest input override
@@ -342,7 +357,9 @@ async function main() {
   }
 
   function respawn(caught) {
-    player.position.copy(L.spawn);
+    // Respawn at the checkpoint for the act the player is currently in (act-1
+    // spawn / bridge start / act-3 start), not always the very beginning.
+    player.position.copy(state.checkpoint);
     vel.set(0, 0, 0);
     state.meter = 0;
     state.lit = false;
@@ -392,14 +409,26 @@ async function main() {
     // Guard light patrols (always animate for a living scene, even pre-start).
     const t = performance.now() / 1000;
     for (const g of L.guards) g.patrol(t);
+
+    // Candle flicker (act-2 bridge): subtle warm shimmer, per-candle phase.
+    // Just mutate intensity; the rt.updateLights() call below already runs
+    // every frame (guard patrols above rely on it) so it picks these up too.
+    for (let i = 0; i < L.candles.length; i++) {
+      const c = L.candles[i];
+      c.light.intensity = c.base * (0.85 + 0.15 * Math.sin(t * 7 + i * 1.7));
+    }
+
     rt.updateLights(scene);
 
-    // Exit beacon pulse.
+    // Beacon pulse — act-1 doorway marker AND the act-3 final exit.
     const pulse = 2.0 + Math.sin(t * 2.2) * 0.9;
-    L.exitBeacon.disc.material.emissiveIntensity = pulse;
-    L.exitBeacon.ring.material.emissiveIntensity = 0.9 + Math.sin(t * 2.2) * 0.5;
+    const ringPulse = 0.9 + Math.sin(t * 2.2) * 0.5;
     const sc = 1 + Math.sin(t * 2.2) * 0.04;
-    L.exitBeacon.ring.scale.set(sc, 1, sc);
+    for (const bc of [L.exitBeacon, L.finalBeacon]) {
+      bc.disc.material.emissiveIntensity = pulse;
+      bc.ring.material.emissiveIntensity = ringPulse;
+      bc.ring.scale.set(sc, 1, sc);
+    }
 
     if (state.started) {
       // Input → acceleration. testInput lets automated playtests drive the
@@ -446,6 +475,18 @@ async function main() {
       resolveCollisions(player.position);
       player.position.y = PLAYER_R; // keep on floor
 
+      // Checkpoint advance (monotonic). Leaving act 1 through the doorway arms
+      // the bridge checkpoint; crossing the bridge midpoint arms the act-3
+      // checkpoint. Detection respawns then drop the player at the current act.
+      const pz = player.position.z;
+      if (state.stage < 2 && pz < L.bridgeMidZ) {
+        state.stage = 2;
+        state.checkpoint = L.checkpoints.act3Start;
+      } else if (state.stage < 1 && pz < L.doorwayZ) {
+        state.stage = 1;
+        state.checkpoint = L.checkpoints.bridgeStart;
+      }
+
       // Detection — only once the player has moved since spawn/respawn. An
       // idle player is never detected, so respawn loops are impossible.
       if (state.moved) {
@@ -466,9 +507,9 @@ async function main() {
         state.meter = Math.max(0, state.meter - DETECT_DECAY * dt);
       }
 
-      // Win check.
-      const dx = player.position.x - L.exit.x;
-      const dz = player.position.z - L.exit.z;
+      // Win check — the REAL exit is now act 3's beacon at the far end.
+      const dx = player.position.x - L.finalExit.x;
+      const dz = player.position.z - L.finalExit.z;
       if (Math.hypot(dx, dz) < WIN_RADIUS) doWin();
 
       // Timer — runs only once the run has actually started (first movement).

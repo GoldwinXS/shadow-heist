@@ -64,7 +64,17 @@ export function buildLevel() {
     return m;
   }
   const hy = ROOM.wallH / 2;
-  wall(ROOM.x * 2 + 1, ROOM.wallH, ROOM.t, 0, hy, -ROOM.z - 0.3);  // back (-z)
+  // Back (-z) wall is now a DOORWAY to the bridge: instead of one solid wall we
+  // build two segments leaving a gap (width DOOR_W, centred at DOOR_CX — the old
+  // exit corner) that funnels the player onto the bridge. The gap is aligned
+  // with the bridge deck + kerbs built later so the transition is seamless.
+  const DOOR_CX = 10, DOOR_W = 3.6;                 // gap x ∈ [8.2, 11.8]
+  const backZ = -ROOM.z - 0.3;                      // -8.3
+  const bwHalf = (ROOM.x * 2 + 1) / 2;              // 12.5 (half the back wall span)
+  const gapL = DOOR_CX - DOOR_W / 2;                // 8.2
+  const gapR = DOOR_CX + DOOR_W / 2;                // 11.8
+  wall(gapL + bwHalf, ROOM.wallH, ROOM.t, (-bwHalf + gapL) / 2, hy, backZ); // back-left seg
+  wall(bwHalf - gapR, ROOM.wallH, ROOM.t, (gapR + bwHalf) / 2, hy, backZ);  // back-right seg
   wall(ROOM.x * 2 + 1, ROOM.wallH, ROOM.t, 0, hy, ROOM.z + 0.3);   // front (+z)
   wall(ROOM.t, ROOM.wallH, ROOM.z * 2 + 1, -ROOM.x - 0.3, hy, 0);  // left (-x)
   wall(ROOM.t, ROOM.wallH, ROOM.z * 2 + 1, ROOM.x + 0.3, hy, 0);   // right (+x)
@@ -270,13 +280,170 @@ export function buildLevel() {
   // Initialise positions at t=0.
   guards.forEach((g) => g.patrol(0));
 
-  const lights = [fill, ambientKey, ambientKey2, g1, g2, g3];
+  // ===================================================================
+  // ACT 2 — THE BRIDGE (set piece). A narrow stone bridge crossing an
+  // abyss: there is NO floor on either side (the outer floor simply does
+  // not exist below the deck), only low kerbs so the player cannot roll
+  // off. Warm candle PointLights line both edges — flickered per-frame in
+  // main.js — over ~0.02-density fog (a per-zone volumetric, wired in
+  // main.js). The deck runs from the act-1 doorway (backZ) toward -Z.
+  // ===================================================================
+  const BRIDGE_LEN = 26;
+  const BRIDGE_Z0 = backZ;                          // -8.3, at the doorway
+  const BRIDGE_Z1 = backZ - BRIDGE_LEN;             // -34.3, at act 3
+  const BRIDGE_MIDZ = (BRIDGE_Z0 + BRIDGE_Z1) / 2;  // -21.3
+  const DECK_W = 3.6;                               // full deck width (matches doorway)
+
+  // Deck: a thin floating slab. Occluder + walkable floor only — NOT a collider
+  // box (the player walks on TOP; kerbs provide the collision walls).
+  const bridgeDeck = new THREE.Mesh(new THREE.BoxGeometry(DECK_W, 0.4, BRIDGE_LEN), stoneMat);
+  bridgeDeck.position.set(DOOR_CX, -0.2, BRIDGE_MIDZ);
+  scene.add(bridgeDeck);
+  occluders.push(bridgeDeck);
+
+  // Side kerbs: low lips at the deck edges. Colliders (in `boxes`) so the player
+  // is confined to the deck, and occluders so detection raycasts see them too.
+  function kerb(x) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.6, BRIDGE_LEN), stoneMat);
+    m.position.set(x, 0.3, BRIDGE_MIDZ);
+    scene.add(m);
+    occluders.push(m);
+    boxes.push({ center: new THREE.Vector3(x, 0.3, BRIDGE_MIDZ), halfExtents: { x: 0.175, z: BRIDGE_LEN / 2 }, rotationY: 0 });
+  }
+  kerb(DOOR_CX - DECK_W / 2); // left edge  (x = 8.2)
+  kerb(DOOR_CX + DECK_W / 2); // right edge (x = 11.8)
+
+  // Candle flames: warm PointLights lining both edges, staggered left/right every
+  // ~3.5 units. Each has a tiny emissive marker mesh (rtExclude → rasterized/
+  // glowing but OUT of the BVH, like the guard fixtures). main.js flickers the
+  // light intensities each frame; the existing per-frame rt.updateLights() picks
+  // them up. NOTE: the library caps total lights at MAX_LIGHTS = 16 (excess are
+  // silently dropped, later-added first). Budget here: 3 fills + 3 act-1 guards +
+  // 2 act-3 guards + 7 candles = 15, leaving room for main.js's moon = 16 exactly.
+  // Denser candles would need a higher MAX_LIGHTS, so they are staggered, not
+  // doubled per rung, to line both edges within budget.
+  const candles = [];
+  const CANDLE_BASE = 3;
+  function candle(x, z) {
+    const l = new THREE.PointLight(0xffb36b, CANDLE_BASE, 6);
+    l.position.set(x, 0.85, z);
+    l.userData.rtRadius = 0.06;
+    scene.add(l);
+    const flame = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.05, 0.09, 0.28, 8),
+      new THREE.MeshStandardMaterial({ color: 0x140a02, emissive: 0xffb060, emissiveIntensity: 6 })
+    );
+    flame.position.set(x, 0.55, z);
+    flame.userData.rtExclude = true; // rasterize-only; never occludes its own light
+    scene.add(flame);
+    candles.push({ light: l, base: CANDLE_BASE, marker: flame });
+  }
+  const CANDLE_XL = DOOR_CX - DECK_W / 2 + 0.35; // just inside the left kerb  (8.55)
+  const CANDLE_XR = DOOR_CX + DECK_W / 2 - 0.35; // just inside the right kerb (11.45)
+  [-10.5, -14, -17.5, -21, -24.5, -28, -31.5].forEach((z, i) => {
+    candle(i % 2 === 0 ? CANDLE_XL : CANDLE_XR, z); // alternate edges (staggered)
+  });
+
+  // ===================================================================
+  // ACT 3 — second challenge room (same mechanics as act 1). Reuses the
+  // wall()/box()/pillar()/guardLight()/aimGuard() helpers. Layout: a central
+  // block splits the entrance into two cover LANES; a diagonal crate line
+  // crosses the middle; the FINAL exit (real win trigger) sits at the far end.
+  // Room interior x ∈ [0, 20], z ∈ [-52.3, -34.3], centred at (10, -43.3).
+  // ===================================================================
+  const A3_CX = DOOR_CX;                 // room centre x = 10 (aligned with bridge)
+  const A3_Z0 = BRIDGE_Z1;               // -34.3, front wall (bridge side)
+  const A3_DEPTH = 18;
+  const A3_Z1 = A3_Z0 - A3_DEPTH;        // -52.3, back wall
+  const A3_MIDZ = (A3_Z0 + A3_Z1) / 2;   // -43.3
+  const A3_HALF = 10.5;                  // half interior width (+ wall thickness margin)
+
+  // Floor slab.
+  const a3floor = new THREE.Mesh(new THREE.BoxGeometry(A3_HALF * 2, 0.4, A3_DEPTH + 0.4), floorMat);
+  a3floor.position.set(A3_CX, -0.2, A3_MIDZ);
+  scene.add(a3floor);
+  occluders.push(a3floor);
+
+  // Walls (open ceiling). Front wall is split around the bridge doorway.
+  const a3y = ROOM.wallH / 2;
+  const a3gapL = A3_CX - DOOR_W / 2, a3gapR = A3_CX + DOOR_W / 2;
+  wall((a3gapL) - (A3_CX - A3_HALF), ROOM.wallH, ROOM.t, ((A3_CX - A3_HALF) + a3gapL) / 2, a3y, A3_Z0); // front-left
+  wall((A3_CX + A3_HALF) - a3gapR, ROOM.wallH, ROOM.t, (a3gapR + (A3_CX + A3_HALF)) / 2, a3y, A3_Z0);   // front-right
+  wall(A3_HALF * 2, ROOM.wallH, ROOM.t, A3_CX, a3y, A3_Z1);                    // back (-z)
+  wall(ROOM.t, ROOM.wallH, A3_DEPTH, A3_CX - A3_HALF, a3y, A3_MIDZ);           // left (-x)
+  wall(ROOM.t, ROOM.wallH, A3_DEPTH, A3_CX + A3_HALF, a3y, A3_MIDZ);           // right (+x)
+
+  // Cover: central splitter + two lane crates + a diagonal line + a pillar.
+  box(2.6, 2.0, 2.2, A3_CX, -38.5);                          // central block (splits into two lanes)
+  box(3.0, 1.6, 1.2, 6.5, -40.0, crateMat, Math.PI / 4.5);   // diagonal crate (left→mid)
+  box(3.0, 1.6, 1.2, 13.5, -46.0, crateMat, Math.PI / 4.5);  // diagonal crate (mid→right)
+  box(2.0, 1.8, 2.0, 3.5, -44.0, crateMat, 0.2);             // left lane cover
+  box(1.8, 2.2, 1.8, 5.0, -48.5);                            // left lane cover (deep)
+  box(2.0, 1.8, 2.0, 16.5, -44.0, crateMat, -0.2);           // right lane cover
+  box(1.8, 2.2, 1.8, 15.0, -48.5);                           // right lane cover (deep)
+  pillar(0.7, 3.0, A3_CX, -45.0);                            // central pillar guarding the exit run
+
+  // Two patrolling guard lights (reuse the act-1 helpers exactly).
+  const { l: gA, fixture: fA } = guardLight(warm, 26);    // sweeps across the room width
+  const { l: gB, fixture: fB } = guardLight(magenta, 26); // orbits the exit approach
+  const act3Guards = [
+    {
+      light: gA, fixture: fA, range: 8,
+      patrol(t) {
+        const pos = (tt) => [A3_CX + Math.sin(tt * 0.5) * 6.5, -41.0];
+        const [x, z] = pos(t), [x2, z2] = pos(t + DT);
+        aimGuard(gA, fA, x, 3.5, z, x2 - x, z2 - z);
+      },
+    },
+    {
+      light: gB, fixture: fB, range: 8,
+      patrol(t) {
+        const pos = (tt) => { const a = tt * 0.5; return [A3_CX + Math.cos(a) * 4.5, -47.0 + Math.sin(a) * 3.5]; };
+        const [x, z] = pos(t), [x2, z2] = pos(t + DT);
+        aimGuard(gB, fB, x, 3.4, z, x2 - x, z2 - z);
+      },
+    },
+  ];
+  act3Guards.forEach((g) => { guards.push(g); g.patrol(0); });
+
+  // Final exit beacon (the real win trigger) at the far end of act 3.
+  const finalExit = new THREE.Vector3(A3_CX, 0.35, -50.0);
+  const finalDisc = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.5, 1.5, 0.12, 40),
+    new THREE.MeshStandardMaterial({ color: 0x0a1a16, emissive: 0x39f0c0, emissiveIntensity: 2.4 })
+  );
+  finalDisc.position.set(finalExit.x, 0.06, finalExit.z);
+  scene.add(finalDisc);
+  const finalRing = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.55, 0.7, 1.1, 24),
+    new THREE.MeshStandardMaterial({ color: 0x0a1a16, emissive: 0x39f0c0, emissiveIntensity: 1.4 })
+  );
+  finalRing.position.set(finalExit.x, 0.55, finalExit.z);
+  scene.add(finalRing);
+  occluders.push(finalRing);
+  const finalBeacon = { disc: finalDisc, ring: finalRing };
+
+  // --- Checkpoints (respawn points) & fog zones exported for main.js ---
+  const checkpoints = {
+    act1Spawn: spawn.clone(),                        // act 1 start
+    bridgeStart: new THREE.Vector3(DOOR_CX, 0.35, BRIDGE_Z0 - 1.2), // just onto the bridge (~ -9.5)
+    act3Start: new THREE.Vector3(A3_CX, 0.35, A3_Z0 - 1.2),         // just into act 3 (~ -35.5)
+  };
+  // AABBs for the volumetric fog zones (library >= fog-zones build). density is
+  // the suggested per-zone value; main.js composes rt.volumetric.zones from these.
+  const bridgeZone = { min: [gapL - 0.7, -2, BRIDGE_Z1 - 0.2], max: [gapR + 0.7, 5, BRIDGE_Z0 + 0.3], density: 0.02 };
+  const act3Zone = { min: [A3_CX - A3_HALF, -1, A3_Z1 - 0.2], max: [A3_CX + A3_HALF, 4, A3_Z0 + 0.2], density: 0.004 };
+
+  const lights = [fill, ambientKey, ambientKey2, g1, g2, g3, gA, gB, ...candles.map((c) => c.light)];
 
   return {
     scene, camera, ROOM,
-    spawn, exit,
+    spawn, exit, finalExit,
     occluders, boxes, cylinders,
     guards, fill, ambientKey, lights,
-    exitBeacon, centralStatue,
+    exitBeacon, finalBeacon, centralStatue,
+    candles, checkpoints, bridgeZone, act3Zone,
+    // Plane markers main.js uses for checkpoint/stage advancement.
+    doorwayZ: backZ, bridgeMidZ: BRIDGE_MIDZ,
   };
 }
