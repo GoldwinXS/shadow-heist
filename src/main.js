@@ -61,19 +61,26 @@ async function main() {
   document.getElementById("app").appendChild(renderer.domElement);
 
   const rt = new RealtimeRaytracer(renderer, {
-    renderScale: 0.5,
-    // Was 16 pre-ReSTIR; blue noise + reservoirs keep moving shadows honest
-    // at a longer history, and the extra accumulation smooths the dark scene.
-    maxHistory: 40,
+    // Raised baseline: strong machines (desktop) look great immediately; the now
+    // flash-free adaptive governor steps renderScale DOWN on weak devices (M1
+    // Pro / phone) to hold targetFps without the old jarring resolution pops.
+    renderScale: 0.75,
+    // Blue noise + reservoirs keep moving shadows honest at a longer history,
+    // and the extra accumulation smooths the (now much larger, many-light) scene.
+    maxHistory: 48,
+    denoiseIterations: 3,
     envColor: new THREE.Color(0x121826), // lifted ambient keeps shadow areas readable
-    // Atmosphere: single-scatter fog turns the guard spot cones into visible
-    // sweeping beams. Global density is now 0 — fog is applied PER ZONE instead
-    // (see rt.volumetric.zones below): a thick candle-lit band over the bridge,
-    // a faint haze in act 3, and none in the act-1 vault.
+    // ReSTIR: cost is flat in light count, so the ~28-light gauntlet stays cheap.
+    // emissiveNEE: REQUIRED so the bridge studs / gallery trim actually cast light.
+    restir: true,
+    emissiveNEE: true,
+    // Atmosphere: single-scatter fog turns spot cones into visible beams and the
+    // fog banks into solid volumes. Global density is 0 — fog is applied PER ZONE
+    // (see rt.volumetric.zones below): bridge band, patrol haze, three dense fog
+    // banks, the god-ray hall, and a faint final-vault mood haze.
     volumetric: { enabled: true, density: 0 },
     // Adaptive quality governor keeps the frame rate near target on weak GPUs by
-    // steering renderScale / denoise / stochastic sampling. restir and
-    // overloadProtection are left at their (on-by-default) values.
+    // steering renderScale / denoise / stochastic sampling.
     adaptiveQuality: true,
     targetFps: 55,
   });
@@ -85,10 +92,18 @@ async function main() {
   // 0.004 haze, while the act-1 vault stays clear. This is just a property
   // write — harmless on the CURRENT build (the pass reads the scalar density),
   // so on older libraries fog simply stays off until the fog-zones build lands.
+  // Composed from level.js. Order: bridge, patrol haze, 3 fog banks, god-ray
+  // hall, final-vault mood. MUST stay ≤ 8 (library MAX_FOG_ZONES) — asserted.
   rt.volumetric.zones = [
-    { min: L.bridgeZone.min, max: L.bridgeZone.max, density: L.bridgeZone.density },
-    { min: L.act3Zone.min, max: L.act3Zone.max, density: L.act3Zone.density },
-  ];
+    L.bridgeZone,
+    L.act3Zone,
+    ...L.fogBankZones,
+    L.godrayZone,
+    L.finalZone,
+  ].map((z) => ({ min: z.min, max: z.max, density: z.density }));
+  if (rt.volumetric.zones.length > 8) {
+    console.error(`[shadow-heist] fog zones ${rt.volumetric.zones.length} > 8 cap`);
+  }
 
   setBoot("building BVH…");
   const t0 = performance.now();
@@ -108,6 +123,7 @@ async function main() {
     won: false,
     meter: 0,
     lit: false,
+    concealed: false,
     attempts: 1,
     elapsed: 0,
     startTime: 0,
@@ -151,6 +167,7 @@ async function main() {
     detect: document.getElementById("detect"),
     vignette: document.getElementById("vignette"),
     flash: document.getElementById("flash"),
+    concealed: document.getElementById("concealed"),
     start: document.getElementById("start"),
     win: document.getElementById("win"),
     winTime: document.getElementById("winTime"),
@@ -277,6 +294,18 @@ async function main() {
     return { litNow, closest };
   }
   const isLit = () => isLitAt(player.position.x, player.position.z);
+
+  // --- Fog-bank concealment (act-3 mechanic) ---
+  // While the player is inside ANY dense fog bank AABB they are hidden: the
+  // detection meter can't rise (it decays as if in shadow), no matter how
+  // directly a guard cone falls on them. This is the room's core mechanic —
+  // the banks are moving-guard-proof stepping stones.
+  function inFogBank(px, pz) {
+    for (const b of L.fogBanks) {
+      if (px >= b.min[0] && px <= b.max[0] && pz >= b.min[2] && pz <= b.max[2]) return true;
+    }
+    return false;
+  }
 
   // --- Collision: circle-vs-oriented-box + circle-vs-circle in XZ ---
   // The player is a circle of radius PLAYER_R (top-down). Boxes may be rotated
@@ -424,7 +453,8 @@ async function main() {
     const pulse = 2.0 + Math.sin(t * 2.2) * 0.9;
     const ringPulse = 0.9 + Math.sin(t * 2.2) * 0.5;
     const sc = 1 + Math.sin(t * 2.2) * 0.04;
-    for (const bc of [L.exitBeacon, L.finalBeacon]) {
+    {
+      const bc = L.finalBeacon; // the only beacon in the game now
       bc.disc.material.emissiveIntensity = pulse;
       bc.ring.material.emissiveIntensity = ringPulse;
       bc.ring.scale.set(sc, 1, sc);
@@ -475,21 +505,26 @@ async function main() {
       resolveCollisions(player.position);
       player.position.y = PLAYER_R; // keep on floor
 
-      // Checkpoint advance (monotonic). Leaving act 1 through the doorway arms
-      // the bridge checkpoint; crossing the bridge midpoint arms the act-3
-      // checkpoint. Detection respawns then drop the player at the current act.
+      // Checkpoint advance (monotonic). Walk the stage table (level.js): the
+      // deepest plane crossed (moving −Z) sets the current stage + checkpoint, so
+      // a detection respawn drops the player at the START of the room they're in,
+      // never further back.
       const pz = player.position.z;
-      if (state.stage < 2 && pz < L.bridgeMidZ) {
-        state.stage = 2;
-        state.checkpoint = L.checkpoints.act3Start;
-      } else if (state.stage < 1 && pz < L.doorwayZ) {
-        state.stage = 1;
-        state.checkpoint = L.checkpoints.bridgeStart;
+      let s = 0;
+      for (let i = 0; i < L.stages.length; i++) if (pz < L.stages[i].z) s = i + 1;
+      if (s > state.stage) {
+        state.stage = s;
+        state.checkpoint = L.stages[s - 1].checkpoint;
       }
 
-      // Detection — only once the player has moved since spawn/respawn. An
-      // idle player is never detected, so respawn loops are impossible.
-      if (state.moved) {
+      // Concealment: inside a fog bank the player is hidden (act-3 mechanic).
+      const concealed = inFogBank(player.position.x, pz);
+      state.concealed = concealed;
+
+      // Detection — only once the player has moved since spawn/respawn, and
+      // never while concealed inside a fog bank. An idle (or hidden) player is
+      // never detected, so respawn loops are impossible.
+      if (state.moved && !concealed) {
         const { litNow, closest } = isLit();
         state.lit = litNow;
         if (litNow) {
@@ -529,6 +564,7 @@ async function main() {
     el.vignette.style.opacity = state.lit ? String(0.35 + state.meter * 0.5) : "0";
     if (state.meter > 0.7) el.detect.classList.add("shake");
     else el.detect.classList.remove("shake");
+    if (el.concealed) el.concealed.classList.toggle("show", state.concealed && state.started);
   }
 
   // --- Resize ---
@@ -542,7 +578,7 @@ async function main() {
 
   // --- Expose for automated testing ---
   Object.assign(window, {
-    RT: rt, SCENE: scene, CAMERA: camera,
+    RT: rt, SCENE: scene, CAMERA: camera, LEVEL: L,
     GAME: {
       player, rt, scene, camera,
       lights: L.lights, guards: L.guards,
@@ -550,6 +586,8 @@ async function main() {
       setPlayerPos(x, z) { player.position.set(x, PLAYER_R, z); vel.set(0, 0, 0); },
       detection: () => state.meter,
       lit: () => state.lit,
+      concealed: () => state.concealed,
+      inFogBank: (x, z) => inFogBank(x, z),
       win: () => state.won,
       start: () => startGame(),
       step,
