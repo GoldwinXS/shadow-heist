@@ -54,6 +54,14 @@ async function main() {
     renderScale: 0.5,
     maxHistory: 16,               // short history → moving lights/shadows react fast
     envColor: new THREE.Color(0x0b0f16), // lifted ambient keeps shadow areas readable
+    // Atmosphere: single-scatter fog turns the guard spot cones into visible
+    // sweeping beams — the whole point of the SpotLight upgrade.
+    volumetric: { enabled: true, density: 0.015 },
+    // Adaptive quality governor keeps the frame rate near target on weak GPUs by
+    // steering renderScale / denoise / stochastic sampling. restir and
+    // overloadProtection are left at their (on-by-default) values.
+    adaptiveQuality: true,
+    targetFps: 55,
   });
 
   setBoot("building BVH…");
@@ -131,16 +139,29 @@ async function main() {
   ray.far = 30;
   const tmpDir = new THREE.Vector3();
   const eyePos = new THREE.Vector3();
+  const spotDir = new THREE.Vector3();   // cone axis: normalize(target - light)
+  const toPlayer = new THREE.Vector3();  // from the light toward the player
 
   function isLitAt(px, pz) {
-    // A position is lit if ANY guard light has line of sight within range.
+    // A position is lit if ANY guard SPOTLIGHT has the player (a) within range,
+    // (b) inside its cone, and (c) with clear line of sight. The cone test is
+    // what makes the guards directional: a player behind or beside a beam is in
+    // shadow even at point-blank range.
     eyePos.set(px, 0.5, pz); // sample near orb centre height
     let litNow = false;
     let closest = 1e9;
     for (const g of L.guards) {
       const lp = g.light.position;
       const dist = eyePos.distanceTo(lp);
-      if (dist > g.range) continue;
+      if (dist > g.range) continue; // (a) range
+
+      // (b) cone: player must be inside the spotlight's outer angle.
+      // cone axis = normalize(target - light); dir to player = normalize(eye - light).
+      spotDir.copy(g.light.target.position).sub(lp).normalize();
+      toPlayer.copy(eyePos).sub(lp).normalize();
+      if (spotDir.dot(toPlayer) < Math.cos(g.light.angle)) continue; // outside the cone
+
+      // (c) occlusion: cast from the player toward the light.
       tmpDir.copy(lp).sub(eyePos).normalize();
       ray.set(eyePos, tmpDir);
       ray.far = dist - 0.1;

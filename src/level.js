@@ -176,18 +176,27 @@ export function buildLevel() {
   ambientKey2.userData.rtRadius = 0.8;
   scene.add(ambientKey2);
 
-  // Three patrolling guard lights (two warm, one magenta for variety). Each
-  // gets a small glowing fixture orb so players can SEE the light source they
-  // are dodging. The fixture uses userData.rtExclude so it rasterizes (visible,
-  // glowing) but stays OUT of the BVH — a mesh at the light's exact position
-  // would otherwise occlude the light's own shadow rays and kill its
+  // Three patrolling guard lights (two warm, one magenta for variety). Now
+  // THREE.SpotLights — the ray tracer casts real cones (penumbra + soft shadows)
+  // and, with volumetric fog on, each cone becomes a VISIBLE sweeping beam.
+  //
+  // Each spot needs its `target` in the scene graph so the compiler can read the
+  // target's world position (the cone axis = normalize(target - light)); the
+  // patrol() functions re-aim the target every frame so the beam sweeps.
+  //
+  // Each light also gets a small glowing fixture orb so players can SEE the
+  // source they are dodging. The fixture uses userData.rtExclude so it rasterizes
+  // (visible, glowing) but stays OUT of the BVH — a mesh at the light's exact
+  // position would otherwise occlude the light's own shadow rays and kill its
   // illumination. rtExclude meshes cost nothing to move (the G-buffer
   // re-rasterizes every frame anyway).
   function guardLight(color, intensity) {
-    const l = new THREE.PointLight(color, intensity, 22);
+    // SpotLight(color, intensity, distance, angle, penumbra)
+    const l = new THREE.SpotLight(color, intensity, 22, 0.45, 0.3);
     l.position.y = 3.5;
-    l.userData.rtRadius = 0.3;
+    l.userData.rtRadius = 0.15;
     scene.add(l);
+    scene.add(l.target); // target must be in the scene so its world matrix updates
     const fixture = new THREE.Mesh(
       new THREE.SphereGeometry(0.18, 16, 12),
       new THREE.MeshStandardMaterial({
@@ -205,35 +214,56 @@ export function buildLevel() {
   const { l: g2, fixture: f2 } = guardLight(warm, 26);    // ping-pong line
   const { l: g3, fixture: f3 } = guardLight(magenta, 26); // orbit central statue
 
+  // Aim a guard spotlight: place it at (x,y,z) and point its cone along the
+  // horizontal patrol direction (fx,fz), angled down at the floor a few units
+  // ahead — so the beam leads the sweep. Falls back to straight-down when the
+  // guard is momentarily near-stationary. The fixture rides the light.
+  const AIM_LEAD = 3.0; // how far ahead of the light the cone hits the floor
+  function aimGuard(light, fixture, x, y, z, fx, fz) {
+    light.position.set(x, y, z);
+    fixture.position.set(x, y, z);
+    const len = Math.hypot(fx, fz);
+    if (len > 1e-4) { fx /= len; fz /= len; } else { fx = 0; fz = 0; }
+    // Target on the floor (y≈0), AIM_LEAD ahead → cone points down-and-forward.
+    light.target.position.set(x + fx * AIM_LEAD, 0.0, z + fz * AIM_LEAD);
+  }
+
   // Patrol speeds tuned for a first-time player: slow enough to read and
   // predict, fast enough to force timing. `range` is the detection range.
+  // Each patrol samples its path at t and t+dt to get the sweep direction it
+  // aims the cone along.
+  const DT = 0.05;
   const guards = [
     {
       light: g1, fixture: f1,
       range: 8,
       patrol(t) {
-        const a = -0.9 + Math.sin(t * 0.3) * 1.15; // sweeping arc
+        // sweeping arc
+        const at = (tt) => -0.9 + Math.sin(tt * 0.3) * 1.15;
         const r = 7.5;
-        g1.position.set(-3.5 + Math.cos(a) * r, 3.6, Math.sin(a) * r * 0.7);
-        f1.position.copy(g1.position);
+        const pos = (tt) => { const a = at(tt); return [-3.5 + Math.cos(a) * r, Math.sin(a) * r * 0.7]; };
+        const [x, z] = pos(t), [x2, z2] = pos(t + DT);
+        aimGuard(g1, f1, x, 3.6, z, x2 - x, z2 - z);
       },
     },
     {
       light: g2, fixture: f2,
       range: 8,
       patrol(t) {
-        const s = Math.sin(t * 0.38); // ping-pong along the right side
-        g2.position.set(6.5, 3.5, s * 6.0);
-        f2.position.copy(g2.position);
+        // ping-pong along the right side
+        const pos = (tt) => [6.5, Math.sin(tt * 0.38) * 6.0];
+        const [x, z] = pos(t), [x2, z2] = pos(t + DT);
+        aimGuard(g2, f2, x, 3.5, z, x2 - x, z2 - z);
       },
     },
     {
       light: g3, fixture: f3,
       range: 8,
       patrol(t) {
-        const a = t * 0.42; // orbit the central statue
-        g3.position.set(Math.cos(a) * 4.5, 3.4, 1.5 + Math.sin(a) * 4.5);
-        f3.position.copy(g3.position);
+        // orbit the central statue
+        const pos = (tt) => { const a = tt * 0.42; return [Math.cos(a) * 4.5, 1.5 + Math.sin(a) * 4.5]; };
+        const [x, z] = pos(t), [x2, z2] = pos(t + DT);
+        aimGuard(g3, f3, x, 3.4, z, x2 - x, z2 - z);
       },
     },
   ];

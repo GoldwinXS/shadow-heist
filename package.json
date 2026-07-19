@@ -14,7 +14,7 @@
   "dependencies": {
     "three": "^0.160.1",
     "three-mesh-bvh": "^0.7.8",
-    "three-realtime-rt": "github:GoldwinXS/three-realtime-rt"
+    "three-realtime-rt": "github:GoldwinXS/three-realtime-rt#a549d8e"
   },
   "devDependencies": {
     "gh-pages": "^6.3.0",
